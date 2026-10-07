@@ -3,7 +3,6 @@ import * as path from "node:path";
 import { getLanguageFromPath, highlightCode, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Markdown, truncateToWidth, visibleWidth, wrapTextWithAnsi, type MarkdownTheme } from "@earendil-works/pi-tui";
 import { safeTerminalText as safeDisplayText } from "../shared/display-text.ts";
-import { qualifyModelWithProvider } from "../shared/model-info.ts";
 import { isTrustedRecordedSessionFile } from "../shared/session-file-trust.ts";
 
 const DEFAULT_MAX_RECORDS = 240;
@@ -326,7 +325,10 @@ function parseTranscriptLines(lines: string[], conversationStarted = false): { e
 		}
 		if (role === "assistant") {
 			assistantSeen = true;
-			const model = qualifyModelWithProvider(stringValue(record.model) ?? stringValue(message?.model), stringValue(message?.provider));
+			// The transcript writer records the assistant message's provider-local id, which can itself contain a slash.
+			const rawModel = stringValue(record.model) ?? stringValue(message?.model);
+			const provider = stringValue(message?.provider);
+			const model = rawModel && provider ? `${provider}/${rawModel}` : rawModel;
 			if (text) appendTextEvent(events, "assistant", text, {
 				...(model ? { model } : {}),
 				...(timestamp !== undefined ? { timestamp } : {}),

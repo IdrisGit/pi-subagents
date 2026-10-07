@@ -3587,7 +3587,7 @@ export function renderSubagentResult(
 		if (r.skillsWarning) {
 			c.addChild(new Text(fit(theme.fg("warning", `Warning: ${r.skillsWarning}`)), 0, 0));
 		}
-		c.addChild(new Text(fit(theme.fg("dim", formatUsage(r.usage, r.model))), 0, 0));
+		c.addChild(new Text(fit(theme.fg("dim", formatUsage(r.usage, r.progress?.model ?? r.model))), 0, 0));
 		if (r.sessionFile) {
 			c.addChild(new Text(fit(theme.fg("dim", `Session: ${shortenPath(r.sessionFile)}`)), 0, 0));
 		}

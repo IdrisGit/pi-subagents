@@ -91,11 +91,13 @@ describe("Fleet inspector structured transcript", () => {
 			const transcriptPath = writeTranscript(root, [
 				{ recordType: "message", role: "assistant", model: "claude-haiku-4-5", text: "qualified", message: { role: "assistant", provider: "anthropic", model: "claude-haiku-4-5" }, ts: 1 },
 				{ recordType: "message", role: "assistant", model: "gpt-5-mini", text: "unqualified", ts: 2 },
+				{ recordType: "message", role: "assistant", model: "openrouter/auto-beta", text: "provider-local id with a slash", message: { role: "assistant", provider: "openrouter", model: "openrouter/auto-beta" }, ts: 3 },
 			]);
 			const transcript = readFleetTranscript(transcriptPath, { trustedRoots: [root] });
 			const assistantEvents = transcript.events.filter((event) => event.kind === "assistant");
 			assert.equal(assistantEvents[0]?.model, "anthropic/claude-haiku-4-5");
 			assert.equal(assistantEvents[1]?.model, "gpt-5-mini");
+			assert.equal(assistantEvents[2]?.model, "openrouter/openrouter/auto-beta");
 			const rendered = renderFleetTranscript(transcript, 60, theme as never, markdownTheme);
 			assert.ok(rendered.some((line) => line.includes("Assistant") && line.includes("anthropic/claude-haiku-4-5")));
 		} finally {
