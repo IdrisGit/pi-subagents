@@ -80,6 +80,17 @@ export function splitKnownThinkingSuffix(model: string): { baseModel: string; th
 	};
 }
 
+/**
+ * Combine an observed model id with the provider that served it into `provider/id`.
+ * The id is returned unchanged when it is already qualified for that provider, so a
+ * provider-local slash id such as `openrouter/openai/gpt-5-mini` is not double-prefixed.
+ */
+export function qualifyModelWithProvider(model: string | undefined, provider: string | undefined): string | undefined {
+	if (!model) return undefined;
+	if (!provider || model.startsWith(`${provider}/`)) return model;
+	return `${provider}/${model}`;
+}
+
 export function findModelInfo(model: string | undefined, availableModels: ModelInfo[] | undefined, preferredProvider?: string): ModelInfo | undefined {
 	if (!model || !availableModels || availableModels.length === 0) return undefined;
 	const { baseModel } = splitKnownThinkingSuffix(model);

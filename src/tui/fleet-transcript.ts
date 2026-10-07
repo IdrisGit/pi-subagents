@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { getLanguageFromPath, highlightCode, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Markdown, truncateToWidth, visibleWidth, wrapTextWithAnsi, type MarkdownTheme } from "@earendil-works/pi-tui";
 import { safeTerminalText as safeDisplayText } from "../shared/display-text.ts";
+import { qualifyModelWithProvider } from "../shared/model-info.ts";
 import { isTrustedRecordedSessionFile } from "../shared/session-file-trust.ts";
 
 const DEFAULT_MAX_RECORDS = 240;
@@ -325,8 +326,9 @@ function parseTranscriptLines(lines: string[], conversationStarted = false): { e
 		}
 		if (role === "assistant") {
 			assistantSeen = true;
+			const model = qualifyModelWithProvider(stringValue(record.model) ?? stringValue(message?.model), stringValue(message?.provider));
 			if (text) appendTextEvent(events, "assistant", text, {
-				...(stringValue(record.model) ? { model: stringValue(record.model) } : {}),
+				...(model ? { model } : {}),
 				...(timestamp !== undefined ? { timestamp } : {}),
 			});
 			continue;
