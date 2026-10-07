@@ -539,7 +539,13 @@ describe("native subagent fleet", () => {
 				{ asyncDirRoot: root, resultsDir: path.join(root, "results"), refreshMs: 60_000, markdownTheme },
 			);
 			try {
-				assert.ok(component.render(100).some((line) => line.includes("openai-codex/gpt-5.5 · thinking high")));
+				// The provider-qualified label wraps across rows in the 61-column detail pane, so
+				// reassemble the detail column before asserting the model and thinking metadata.
+				const detail = component.render(100)
+					.map((line) => line.split("│")[2] ?? "")
+					.join(" ")
+					.replace(/\s+/g, " ");
+				assert.ok(detail.includes("openai-codex/gpt-5.5 · thinking high"));
 			} finally {
 				component.dispose();
 			}

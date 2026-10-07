@@ -51,6 +51,19 @@ describe("model info helpers", () => {
 		assert.equal(qualifyModelWithProvider("", "anthropic"), undefined);
 	});
 
+	it("resolves provider-local ids to their canonical full id through the registry", () => {
+		const openrouterCatalog: ModelInfo[] = [
+			{ provider: "openrouter", id: "openai/gpt-5-mini", fullId: "openrouter/openai/gpt-5-mini" },
+			{ provider: "openrouter", id: "openrouter/auto-beta", fullId: "openrouter/openrouter/auto-beta" },
+		];
+		// A provider-local id that repeats its provider keeps the canonical doubled form.
+		assert.equal(qualifyModelWithProvider("openrouter/auto-beta", "openrouter", openrouterCatalog), "openrouter/openrouter/auto-beta");
+		assert.equal(qualifyModelWithProvider("openrouter/openrouter/auto-beta", "openrouter", openrouterCatalog), "openrouter/openrouter/auto-beta");
+		// A provider-local slash id that does not repeat its provider resolves to its full id.
+		assert.equal(qualifyModelWithProvider("openai/gpt-5-mini", "openrouter", openrouterCatalog), "openrouter/openai/gpt-5-mini");
+		assert.equal(qualifyModelWithProvider("openrouter/openai/gpt-5-mini", "openrouter", openrouterCatalog), "openrouter/openai/gpt-5-mini");
+	});
+
 	it("keeps the legacy thinking list for models without per-level metadata", () => {
 		assert.deepEqual(
 			getSupportedThinkingLevels({ provider: "openai", id: "gpt-5", fullId: "openai/gpt-5", reasoning: true }),

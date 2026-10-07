@@ -1108,7 +1108,7 @@ async function runSingleAttempt(
 					}
 					projectCompleteUsage();
 					if (evt.message.model) {
-						const observedModel = qualifyModelWithProvider(evt.message.model, evt.message.provider) ?? evt.message.model;
+						const observedModel = qualifyModelWithProvider(evt.message.model, evt.message.provider, options.availableModels) ?? evt.message.model;
 						progress.model = observedModel;
 						if (!result.model) result.model = observedModel;
 						if (expectedModelForVerification && !hasToolCall) {

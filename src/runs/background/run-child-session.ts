@@ -518,7 +518,7 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 				if (event.type !== "message_end" || event.message.role !== "assistant") return;
 				const hasToolCall = assistantStartsToolCall(event.message);
 				if (event.message.model) {
-					model = qualifyModelWithProvider(event.message.model, event.message.provider) ?? event.message.model;
+					model = qualifyModelWithProvider(event.message.model, event.message.provider, input.modelVerificationRegistry) ?? event.message.model;
 					if (input.expectedModelForVerification && !hasToolCall) {
 						const modelVerificationError = formatSubagentModelVerificationError(input.expectedModelForVerification, event.message.model, input.modelVerificationRegistry, input.modelResponseAliases, session?.virtualModelId);
 						if (modelVerificationError && !error) error = modelVerificationError;
