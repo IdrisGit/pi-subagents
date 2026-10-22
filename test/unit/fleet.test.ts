@@ -1212,7 +1212,12 @@ describe("native subagent fleet", () => {
 				component.handleInput("J");
 				assert.deepEqual(component.render(100), bottom);
 				assert.equal((component as Component).handleMouse?.(event({ type: "click", button: "left", x: 5, y: 4 }))?.handled, true);
-				assert.match(component.render(100)[1]!, /beta/);
+				const selected = component.render(100);
+				assert.match(selected[1]!, /beta/);
+				for (const outside of [{ x: 5, y: 4 }, { x: 50, y: 0 }]) {
+					assert.equal((component as Component).handleMouse?.(event(outside))?.handled, true, "wheel outside the output pane must not reach the transcript");
+					assert.deepEqual(component.render(100), selected);
+				}
 			} finally { component.dispose(); }
 		} finally { fs.rmSync(root, { recursive: true, force: true }); }
 	});

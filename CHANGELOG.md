@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- In fullscreen mode, the FleetView inspector now selects a child when you click its roster row and scrolls the output pane with the mouse wheel or trackpad, without scrolling the conversation behind it. Keyboard controls are unchanged. Thanks to [@IdrisGit](https://github.com/IdrisGit) for #2992.
+
 ## [0.80.0] - 2026-10-21
 
 ### Highlights

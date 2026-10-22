@@ -1057,7 +1057,8 @@ export class SubagentFleetComponent implements Component {
 			this.selectItem(index);
 			return { handled: true, render: false };
 		}
-		return undefined;
+		// Unowned wheel inside the overlay would otherwise scroll the transcript behind it.
+		return event.type === "wheel" ? { handled: true, render: false } : undefined;
 	}
 
 	handleInput(data: string): void {
