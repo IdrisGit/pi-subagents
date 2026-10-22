@@ -20,7 +20,7 @@ import { parseChain, parseJsonChain } from "./chain-serializer.ts";
 import { mergeAgentsForScope } from "./agent-selection.ts";
 import { projectScopeRequiresTrustMessage } from "./agent-scope.ts";
 import { closestMatch } from "../shared/edit-distance.ts";
-import { parseFrontmatter, parseFrontmatterList } from "./frontmatter.ts";
+import { frontmatterDiagnosticIdentity, frontmatterScalar, parseFrontmatter, parseFrontmatterList, type Frontmatter } from "./frontmatter.ts";
 import { buildRuntimeName, parsePackageName } from "./identity.ts";
 import { parseModelScopeConfig, type ModelScopeConfig } from "../runs/shared/model-scope.ts";
 export { BUILTIN_AGENT_NAMES } from "./builtin-names.ts";
@@ -188,7 +188,7 @@ export interface AgentConfig {
 	/** Name of a user-configured `runnerLaunchers` entry that wraps this agent's background runner. */
 	launcher?: string;
 	disabled?: boolean;
-	extraFields?: Record<string, string>;
+	extraFields?: Record<string, unknown>;
 	override?: BuiltinAgentOverrideInfo;
 	modelSource?: AgentModelSourceInfo;
 	maxThinking?: ThinkingLevel;
@@ -253,7 +253,7 @@ export interface ChainConfig {
 	source: AgentSource;
 	filePath: string;
 	steps: ChainStepConfig[];
-	extraFields?: Record<string, string>;
+	extraFields?: Record<string, unknown>;
 }
 
 export interface ChainDiscoveryDiagnostic {
@@ -2040,14 +2040,11 @@ function isJsonSerializable(value: unknown): boolean {
 	return false;
 }
 
-function parseAgentRunnerFrontmatter(raw: string | undefined, agentName: string): AgentRunnerConfig | undefined {
-	if (raw === undefined || !raw.trim()) return undefined;
-	let parsed: unknown;
-	try {
-		parsed = parseYaml(raw);
-	} catch (error) {
-		throw new Error(`Agent '${agentName}' has invalid runner frontmatter: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-	}
+const STRUCTURED_FRONTMATTER_FIELDS = new Set(["runner", "acceptance", "permissions", "permission", "toolBudget", "outputSchema", "memory"]);
+const LIST_FRONTMATTER_FIELDS = new Set(["tools", "excludeTools", "allowedAgents", "defaultReads", "aliases", "alias", "skills", "skill", "skillPath", "extensions", "subagentOnlyExtensions", "mutationTools"]);
+
+function parseAgentRunnerFrontmatter(parsed: unknown, agentName: string): AgentRunnerConfig | undefined {
+	if (parsed === undefined || parsed === "") return undefined;
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
 		throw new Error(`Agent '${agentName}' has invalid runner frontmatter; expected an object.`);
 	}
@@ -2101,7 +2098,7 @@ function parseAgentRunnerFrontmatter(raw: string | undefined, agentName: string)
 	};
 }
 
-function validateExternalRunnerProfile(frontmatter: Record<string, string>, agentName: string, runner: AgentRunnerConfig | undefined): void {
+function validateExternalRunnerProfile(frontmatter: Frontmatter, agentName: string, runner: AgentRunnerConfig | undefined): void {
 	if (runner?.type !== "external-cli" && runner?.type !== "external-job") return;
 	// The code-owned Claude Code adapters accept an explicit model and thinking level:
 	// both are translated into their own argv rather than into a Pi child model.
@@ -2113,14 +2110,8 @@ function validateExternalRunnerProfile(frontmatter: Record<string, string>, agen
 	}
 }
 
-function parseAgentAcceptanceFrontmatter(raw: string | undefined, agentName: string): AcceptanceInput | undefined {
-	if (raw === undefined || !raw.trim()) return undefined;
-	let parsed: unknown;
-	try {
-		parsed = parseYaml(raw);
-	} catch (error) {
-		throw new Error(`Agent '${agentName}' has invalid acceptance frontmatter: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-	}
+function parseAgentAcceptanceFrontmatter(parsed: unknown, agentName: string): AcceptanceInput | undefined {
+	if (parsed === undefined || parsed === "") return undefined;
 	const errors = validateAcceptanceInput(parsed, `Agent '${agentName}' acceptance frontmatter`);
 	if (errors.length > 0) throw new Error(errors.join(" "));
 	return parsed as AcceptanceInput;
@@ -2168,43 +2159,48 @@ function loadAgentsFromDefinitionFiles(files: AgentDefinitionFile[], source: Age
 		let runtimeName: string | undefined;
 		let packageSpecified = false;
 		try {
-		const { frontmatter, body } = parseFrontmatter(content);
-
-		if (!frontmatter.name || !frontmatter.description) {
-			continue;
-		}
-
-		const localName = frontmatter.name;
+		const { frontmatter: values, body } = parseFrontmatter(content);
+		const localName = frontmatterScalar(values.name, "name");
+		if (!localName) continue;
 		name = localName;
-		const parsedPackage = parsePackageName(frontmatter.package, `Agent '${localName}' package`);
+		const parsedPackage = parsePackageName(frontmatterScalar(values.package, "package"), `Agent '${localName}' package`);
 		packageSpecified = parsedPackage.packageName !== undefined || parsedPackage.error !== undefined;
 		if (parsedPackage.error) throw new Error(parsedPackage.error);
 		const packageName = parsedPackage.packageName;
 		runtimeName = buildRuntimeName(localName, packageName);
+		if (values.description === null) throw new Error(`Agent '${localName}' has invalid description frontmatter; expected a non-null scalar.`);
+		const description = frontmatterScalar(values.description, "description");
+		if (!description) continue;
 
-		const runner = parseAgentRunnerFrontmatter(frontmatter.runner, localName);
-		validateExternalRunnerProfile(frontmatter, localName, runner);
+		const frontmatter: Record<string, string | undefined> = { name: localName, description, package: packageName };
+		for (const [key, value] of Object.entries(values)) {
+			if (key === "name" || key === "description" || key === "package" || !KNOWN_FIELDS.has(key) || STRUCTURED_FRONTMATTER_FIELDS.has(key) || LIST_FRONTMATTER_FIELDS.has(key)) continue;
+			frontmatter[key] = frontmatterScalar(value, key);
+		}
+
+		const runner = parseAgentRunnerFrontmatter(values.runner, localName);
+		validateExternalRunnerProfile(values, localName, runner);
 		let advertise: boolean | undefined;
 		if (frontmatter.advertise !== undefined) {
 			if (frontmatter.advertise === "true") advertise = true;
 			else if (frontmatter.advertise === "false") advertise = false;
 			else throw new Error(`Agent '${localName}' has invalid advertise frontmatter; expected true or false.`);
 		}
-		const rawTools = parseFrontmatterList(frontmatter.tools);
+		const rawTools = parseFrontmatterList(values.tools, "tools");
 		const parsedTools = splitToolList(rawTools);
 		const tools = parsedTools.tools ?? [];
 		const mcpDirectTools = parsedTools.mcpDirectTools ?? [];
-		const excludeTools = parseFrontmatterList(frontmatter.excludeTools);
-		const parsedAllowedAgents = parseFrontmatterList(frontmatter.allowedAgents);
+		const excludeTools = parseFrontmatterList(values.excludeTools, "excludeTools");
+		const parsedAllowedAgents = parseFrontmatterList(values.allowedAgents, "allowedAgents");
 		const allowedAgents = parsedAllowedAgents === undefined ? undefined : normalizeCapabilityCeilingAllowedAgents(parsedAllowedAgents);
-		const defaultReads = parseFrontmatterList(frontmatter.defaultReads);
-		const aliases = normalizeAgentAliases(parseFrontmatterList(frontmatter.aliases ?? frontmatter.alias), runtimeName);
+		const defaultReads = parseFrontmatterList(values.defaultReads, "defaultReads");
+		const aliases = normalizeAgentAliases(parseFrontmatterList(values.aliases !== undefined ? values.aliases : values.alias, "aliases"), runtimeName);
 		const profileError = validateCodeOwnedProfileRunner({ name: runtimeName, localName, aliases, runner });
 		if (profileError) throw new Error(profileError);
-		const skillStr = frontmatter.skill || frontmatter.skills;
-		const skills = parseFrontmatterList(skillStr);
-		const skillPath = parseFrontmatterList(frontmatter.skillPath);
-		if (frontmatter.fallbackModels !== undefined) throw new Error(`Agent '${filePath}' uses removed frontmatter field 'fallbackModels'. Configure one model instead.`);
+		const skillStr = values.skill || values.skills;
+		const skills = parseFrontmatterList(skillStr, "skills");
+		const skillPath = parseFrontmatterList(values.skillPath, "skillPath");
+		if (values.fallbackModels !== undefined) throw new Error(`Agent '${filePath}' uses removed frontmatter field 'fallbackModels'. Configure one model instead.`);
 		const systemPromptMode = frontmatter.systemPromptMode === "replace"
 			? "replace"
 			: frontmatter.systemPromptMode === "append"
@@ -2248,7 +2244,7 @@ function loadAgentsFromDefinitionFiles(files: AgentDefinitionFile[], source: Age
 			}
 			defaultToolTimeoutMs = parsed;
 		}
-		const defaultAcceptance = parseAgentAcceptanceFrontmatter(frontmatter.acceptance, localName);
+		const defaultAcceptance = parseAgentAcceptanceFrontmatter(values.acceptance, localName);
 		let outputMode: OutputMode | undefined;
 		if (frontmatter.outputMode !== undefined) {
 			if (frontmatter.outputMode === "inline" || frontmatter.outputMode === "file-only") outputMode = frontmatter.outputMode;
@@ -2260,9 +2256,9 @@ function loadAgentsFromDefinitionFiles(files: AgentDefinitionFile[], source: Age
 			else throw new Error(`Agent '${localName}' has invalid acceptanceRole frontmatter; expected 'read-only' or 'writer'.`);
 		}
 
-		const extensions = resolveAgentRelativeExtensionPaths(parseFrontmatterList(frontmatter.extensions), filePath);
-		const subagentOnlyExtensions = resolveAgentRelativeExtensionPaths(parseFrontmatterList(frontmatter.subagentOnlyExtensions), filePath);
-		const mutationTools = parseFrontmatterList(frontmatter.mutationTools);
+		const extensions = resolveAgentRelativeExtensionPaths(parseFrontmatterList(values.extensions, "extensions"), filePath);
+		const subagentOnlyExtensions = resolveAgentRelativeExtensionPaths(parseFrontmatterList(values.subagentOnlyExtensions, "subagentOnlyExtensions"), filePath);
+		const mutationTools = parseFrontmatterList(values.mutationTools, "mutationTools");
 		let fast: boolean | undefined;
 		if (frontmatter.fast !== undefined) {
 			if (frontmatter.fast === "true") fast = true;
@@ -2276,42 +2272,41 @@ function loadAgentsFromDefinitionFiles(files: AgentDefinitionFile[], source: Age
 			else throw new Error(`Agent '${localName}' has invalid allowNestedSubagents frontmatter; expected true or false.`);
 		}
 
-		const extraFields: Record<string, string> = {};
-		for (const [key, value] of Object.entries(frontmatter)) {
+		const extraFields: Record<string, unknown> = {};
+		for (const [key, value] of Object.entries(values)) {
 			if (!KNOWN_FIELDS.has(key)) extraFields[key] = value;
 		}
 
 		const parsedMaxSubagentDepth = Number(frontmatter.maxSubagentDepth);
-		if (frontmatter.permission !== undefined && frontmatter.permissions !== undefined) {
+		if (values.permission !== undefined && values.permissions !== undefined) {
 			throw new Error(`Agent '${localName}' cannot declare both permission and permissions frontmatter.`);
 		}
-		const permissionSource = frontmatter.permissions ?? frontmatter.permission;
-		const permissions = permissionSource?.trim()
-			? validatePermissionRules(parseYaml(permissionSource), `Agent '${localName}' permissions`)
-			: undefined;
+		const permissionSource = values.permissions !== undefined ? values.permissions : values.permission;
+		const permissions = permissionSource === undefined || permissionSource === ""
+			? undefined
+			: validatePermissionRules(permissionSource, `Agent '${localName}' permissions`);
 		let toolBudget: ToolBudgetConfig | undefined;
-		if (frontmatter.toolBudget !== undefined && frontmatter.toolBudget.trim()) {
-			const parsed = JSON.parse(frontmatter.toolBudget) as unknown;
+		if (values.toolBudget !== undefined && values.toolBudget !== "") {
+			const parsed = values.toolBudget;
 			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-				throw new Error(`Agent '${localName}' has invalid toolBudget frontmatter; expected a JSON object.`);
+				throw new Error(`Agent '${localName}' has invalid toolBudget frontmatter; expected an object.`);
 			}
 			toolBudget = parsed as ToolBudgetConfig;
 		}
 		let outputSchema: JsonSchemaObject | undefined;
-		if (frontmatter.outputSchema !== undefined && frontmatter.outputSchema.trim()) {
-			const parsed: unknown = JSON.parse(frontmatter.outputSchema);
-			assertJsonSchemaObject(parsed, `Agent '${localName}' outputSchema`);
-			outputSchema = parsed;
+		if (values.outputSchema !== undefined && values.outputSchema !== "") {
+			assertJsonSchemaObject(values.outputSchema, `Agent '${localName}' outputSchema`);
+			outputSchema = values.outputSchema as JsonSchemaObject;
 		}
 
 		const maxSubagentDepth = Number.isInteger(parsedMaxSubagentDepth) && parsedMaxSubagentDepth >= 0
 			? parsedMaxSubagentDepth
 			: undefined;
-		const memory = parseMemoryFrontmatter(frontmatter.memory);
+		const memory = parseMemoryFrontmatter(values.memory);
 		const machine = validateOptionalMachine(frontmatter.machine, `Agent '${runtimeName}' frontmatter 'machine'`);
 		const launcher = frontmatter.launcher;
-		if (launcher !== undefined && !RUNNER_LAUNCHER_NAME_PATTERN.test(launcher)) {
-			throw new Error(`Agent '${runtimeName}' frontmatter 'launcher' ${JSON.stringify(launcher)} is invalid; launcher names ${RUNNER_LAUNCHER_NAME_RULE}.`);
+		if ((values.launcher !== undefined && launcher === undefined) || (launcher !== undefined && !RUNNER_LAUNCHER_NAME_PATTERN.test(launcher))) {
+			throw new Error(`Agent '${runtimeName}' frontmatter 'launcher' ${JSON.stringify(values.launcher)} is invalid; launcher names ${RUNNER_LAUNCHER_NAME_RULE}.`);
 		}
 		if (launcher !== undefined && (runner?.type === "external-cli" || runner?.type === "external-job" || machine !== undefined)) {
 			throw new Error(`Agent '${runtimeName}' sets 'launcher', which wraps the local Pi background runner, so it cannot be combined with ${machine !== undefined ? "'machine'" : `runner.type='${runner!.type}'`}.`);
@@ -2324,7 +2319,7 @@ function loadAgentsFromDefinitionFiles(files: AgentDefinitionFile[], source: Age
 			...(packageSource?.packageName ? { packageSourceName: packageSource.packageName } : {}),
 			...(packageSource?.packageVersion ? { packageSourceVersion: packageSource.packageVersion } : {}),
 			...(packageSource?.packageRoot ? { packageSourceRoot: packageSource.packageRoot } : {}),
-			description: frontmatter.description,
+			description,
 			...(advertise !== undefined ? { advertise } : {}),
 			...(aliases !== undefined ? { aliases } : {}),
 			...(rawTools !== undefined ? { tools } : {}),
@@ -2368,9 +2363,22 @@ function loadAgentsFromDefinitionFiles(files: AgentDefinitionFile[], source: Age
 			...(memory !== undefined ? { memory } : {}),
 			...(Object.keys(extraFields).length > 0 ? { extraFields } : {}),
 		};
-		agentFrontmatterFields.set(agent, new Set(Object.keys(frontmatter)));
+		agentFrontmatterFields.set(agent, new Set(Object.keys(values)));
 		agents.push(agent);
 		} catch (error) {
+			// On a YAML syntax error, recover only an unambiguous simple identity for
+			// diagnostics. Never turn a malformed definition into an executable agent.
+			if (!runtimeName) {
+				const identity = frontmatterDiagnosticIdentity(content);
+				name ??= identity.name;
+				if (name && identity.packageName) {
+					const parsed = parsePackageName(identity.packageName, `Agent '${name}' package`);
+					if (parsed.packageName) {
+						packageSpecified = true;
+						runtimeName = buildRuntimeName(name, parsed.packageName);
+					}
+				}
+			}
 			diagnostics.push({ source, filePath, ...(name ? { name } : {}), ...(runtimeName && runtimeName !== name ? { runtimeName } : {}), ...(packageSpecified ? { packageSpecified: true } : {}), ...(discoveryPriority !== undefined ? { discoveryPriority } : {}), error: error instanceof Error ? error.message : String(error) });
 		}
 	}

@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { parseFrontmatter } from "../agents/frontmatter.ts";
+import { frontmatterScalar, parseFrontmatter, parseFrontmatterList, type Frontmatter } from "../agents/frontmatter.ts";
 import type { SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
 import { getPromptDirectories } from "../shared/prompt-resources.ts";
 
@@ -62,26 +62,26 @@ function firstNonEmptyLine(value: string): string {
 	return value.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "Prompt workflow";
 }
 
-function stringField(frontmatter: Record<string, string>, key: string): string | undefined {
-	const value = frontmatter[key]?.trim();
+function stringField(frontmatter: Frontmatter, key: string): string | undefined {
+	const value = frontmatterScalar(frontmatter[key], key)?.trim();
 	return value ? value : undefined;
 }
 
-function booleanField(frontmatter: Record<string, string>, key: string): boolean | undefined {
-	const value = frontmatter[key]?.trim().toLowerCase();
+function booleanField(frontmatter: Frontmatter, key: string): boolean | undefined {
+	const value = frontmatterScalar(frontmatter[key], key)?.trim().toLowerCase();
 	if (value === "true" || value === "yes" || value === "1") return true;
 	if (value === "false" || value === "no" || value === "0") return false;
 	return undefined;
 }
 
-function parseSkill(value: string | undefined): string | string[] | false | undefined {
-	if (!value) return undefined;
-	if (value === "false") return false;
-	const parts = value.split(",").map((part) => part.trim()).filter(Boolean);
+function parseSkill(value: unknown): string | string[] | false | undefined {
+	if (value === false || value === "false") return false;
+	const parts = parseFrontmatterList(value, "skill");
+	if (!parts?.length) return undefined;
 	return parts.length > 1 ? parts : parts[0];
 }
 
-function parseAgent(frontmatter: Record<string, string>): string {
+function parseAgent(frontmatter: Frontmatter): string {
 	const subagent = stringField(frontmatter, "subagent");
 	if (!subagent || subagent === "true") return "delegate";
 	return subagent;
@@ -93,7 +93,7 @@ function loadPromptWorkflow(filePath: string): PromptWorkflow | undefined {
 	const name = path.basename(filePath, ".md");
 	if (!name || RESERVED_COMMAND_NAMES.has(name)) return undefined;
 	const model = stringField(frontmatter, "model");
-	const skill = parseSkill(stringField(frontmatter, "skill"));
+	const skill = parseSkill(frontmatter.skill);
 	const cwd = stringField(frontmatter, "cwd");
 	const chain = stringField(frontmatter, "chain");
 	return {
@@ -111,13 +111,32 @@ function loadPromptWorkflow(filePath: string): PromptWorkflow | undefined {
 	};
 }
 
-export function discoverPromptWorkflows(cwd: string): PromptWorkflow[] {
-	const workflows = new Map<string, PromptWorkflow>();
+function scanPromptWorkflows(cwd: string): { workflows: PromptWorkflow[]; diagnostics: Map<string, string> } {
+	// Files are ordered package → user → project. A malformed higher-priority
+	// definition must not silently select a lower-priority one of the same name.
+	const entries = new Map<string, PromptWorkflow | string>();
 	for (const file of readPromptFiles(cwd)) {
-		const workflow = loadPromptWorkflow(file);
-		if (workflow) workflows.set(workflow.name, workflow);
+		const name = path.basename(file, ".md");
+		if (!name || RESERVED_COMMAND_NAMES.has(name)) continue;
+		try {
+			const workflow = loadPromptWorkflow(file);
+			if (workflow) entries.set(name, workflow);
+		} catch (error) {
+			if (error && typeof error === "object" && "code" in error) throw error;
+			entries.set(name, `Invalid prompt workflow '${name}' (${file}): ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
-	return [...workflows.values()].sort((a, b) => a.name.localeCompare(b.name));
+	const workflows: PromptWorkflow[] = [];
+	const diagnostics = new Map<string, string>();
+	for (const [name, entry] of entries) {
+		if (typeof entry === "string") diagnostics.set(name, entry);
+		else workflows.push(entry);
+	}
+	return { workflows: workflows.sort((a, b) => a.name.localeCompare(b.name)), diagnostics };
+}
+
+export function discoverPromptWorkflows(cwd: string): PromptWorkflow[] {
+	return scanPromptWorkflows(cwd).workflows;
 }
 
 function shellWords(input: string): string[] {
@@ -248,11 +267,12 @@ function findWorkflow(workflows: PromptWorkflow[], name: string): PromptWorkflow
 	return workflows.find((workflow) => workflow.name === name);
 }
 
-function formatWorkflowList(workflows: PromptWorkflow[]): string {
-	if (workflows.length === 0) return "No prompt workflows found in package, user, or project prompts.";
+function formatWorkflowList(workflows: PromptWorkflow[], diagnostics: Map<string, string>): string {
+	if (workflows.length === 0 && diagnostics.size === 0) return "No prompt workflows found in package, user, or project prompts.";
 	return [
 		"Prompt workflows:",
 		...workflows.map((workflow) => `- ${workflow.name}: ${workflow.description} (${workflow.filePath})`),
+		...diagnostics.values(),
 	].join("\n");
 }
 
@@ -267,9 +287,13 @@ export function registerPromptWorkflowCommands(input: {
 		handler: async (rawArgs, ctx) => {
 			const words = shellWords(rawArgs);
 			const name = words.shift();
-			const workflows = discoverPromptWorkflows(ctx.cwd);
+			const { workflows, diagnostics } = scanPromptWorkflows(ctx.cwd);
 			if (!name || name === "list") {
-				pi.sendMessage({ content: formatWorkflowList(workflows), display: true } as Parameters<typeof pi.sendMessage>[0]);
+				pi.sendMessage({ content: formatWorkflowList(workflows, diagnostics), display: true } as Parameters<typeof pi.sendMessage>[0]);
+				return;
+			}
+			if (diagnostics.has(name)) {
+				ctx.ui.notify(diagnostics.get(name)!, "error");
 				return;
 			}
 			const workflow = findWorkflow(workflows, name);
@@ -282,7 +306,7 @@ export function registerPromptWorkflowCommands(input: {
 				if (workflow.chain) {
 					const chain = splitPromptChain(workflow.chain).map((stepName) => {
 						const step = findWorkflow(workflows, stepName);
-						if (!step) throw new Error(`Unknown prompt workflow in chain '${workflow.name}': ${stepName}`);
+						if (!step) throw new Error(diagnostics.get(stepName) ?? `Unknown prompt workflow in chain '${workflow.name}': ${stepName}`);
 						return step;
 					});
 					await run(promptWorkflowExecutionParams(chain, runtime.args, runtime), ctx);

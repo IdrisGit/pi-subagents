@@ -10,7 +10,7 @@ import { parseChain, serializeChain } from "../../src/agents/chain-serializer.ts
 import { discoverAgents, discoverAgentsAll, inspectAgentDefinitionDirectory, type AgentConfig } from "../../src/agents/agents.ts";
 import { parseFrontmatter, parseFrontmatterList } from "../../src/agents/frontmatter.ts";
 import { buildInProcessChildLaunch } from "../../src/runs/shared/child-launch.ts";
-import { applyThinkingSuffix } from "../../src/runs/shared/child-tool-plan.ts";
+import { applyThinkingSuffix, resolvePiLaunchToolPlan } from "../../src/runs/shared/child-tool-plan.ts";
 import { THINKING_LEVELS } from "../../src/shared/model-info.ts";
 
 const tempDirs: string[] = [];
@@ -117,13 +117,13 @@ describe("agent outputSchema frontmatter", () => {
 	it("rejects malformed, null, and array output schemas", () => withTempHome(() => {
 		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-output-schema-invalid-"));
 		tempDirs.push(project);
-		for (const [name, value] of [["malformed", "{"], ["null", "null"], ["array", "[]"]]) {
+		for (const [name, value] of [["malformed", "{"], ["nil", "null"], ["array", "[]"]]) {
 			writeAgent(path.join(project, ".pi", "agents", `${name}.md`), `---\nname: ${name}\ndescription: Invalid schema\noutputSchema: ${value}\n---\nBody\n`);
 		}
 		const discovered = discoverAgents(project, "project");
-		assert.deepEqual(discovered.agents.filter((agent) => ["malformed", "null", "array"].includes(agent.name)), []);
+		assert.deepEqual(discovered.agents.filter((agent) => ["malformed", "nil", "array"].includes(agent.name)), []);
 		assert.equal(discovered.agentDiagnostics?.length, 3);
-		assert.match(discovered.agentDiagnostics?.find(({ name }) => name === "malformed")?.error ?? "", /JSON|position|property/i);
+		assert.match(discovered.agentDiagnostics?.find(({ filePath }) => filePath.endsWith("malformed.md"))?.error ?? "", /YAML|flow|end/i);
 		assert.equal(discovered.agentDiagnostics?.filter(({ error }) => /outputSchema.*object/i.test(error)).length, 2);
 	}));
 });
@@ -206,7 +206,7 @@ description: >-
 ---
 body`);
 
-		assert.equal(folded.frontmatter.description, expected);
+		assert.equal(folded.frontmatter.description, `${expected}\n`);
 		assert.equal(stripped.frontmatter.description, expected);
 		assert.equal(folded.frontmatter.name, "worker");
 	});
@@ -230,7 +230,7 @@ description: ${indicator}
   second line
 ---
 body`);
-			assert.equal(parsed.frontmatter.description, "first line\nsecond line");
+			assert.equal(parsed.frontmatter.description, `first line\nsecond line${indicator === "|" ? "\n" : ""}`);
 		}
 	});
 
@@ -249,7 +249,7 @@ name: worker
 ---
 body`);
 
-		assert.equal(parsed.frontmatter.description, "normal\n  code\nnext\nfirst\n\nsecond");
+		assert.equal(parsed.frontmatter.description, "normal\n  code\nnext\nfirst\n\n   \nsecond\n");
 		assert.equal(parsed.frontmatter.name, "worker");
 	});
 
@@ -271,8 +271,8 @@ description: >
 ---
 body`);
 
-		assert.equal(afterIndented.frontmatter.description, "normal\n  code\n\nnext");
-		assert.equal(beforeIndented.frontmatter.description, "normal\n\n  code\nnext");
+		assert.equal(afterIndented.frontmatter.description, "normal\n  code\n\nnext\n");
+		assert.equal(beforeIndented.frontmatter.description, "normal\n\n  code\nnext\n");
 	});
 });
 
@@ -287,7 +287,7 @@ describe("frontmatter comments", () => {
 	});
 
 	it("keeps # inside quoted list items and block scalars", () => {
-		assert.deepEqual(toolsOf('tools:\n  - "a # b"\n  - bash'), ['"a # b"', "bash"]);
+		assert.deepEqual(toolsOf('tools:\n  - "a # b"\n  - bash'), ["a # b", "bash"]);
 		assert.deepEqual(parseFrontmatterList(parseFrontmatter('---\ndefaultReads: "notes #1.md"\n---\nbody').frontmatter.defaultReads), ["notes #1.md"]);
 		const parsed = parseFrontmatter(`---
 description: |
@@ -298,8 +298,162 @@ notes: >
   # two
 ---
 body`);
-		assert.equal(parsed.frontmatter.description, "first\n# kept");
-		assert.equal(parsed.frontmatter.notes, "one # two");
+		assert.equal(parsed.frontmatter.description, "first\n# kept\n");
+		assert.equal(parsed.frontmatter.notes, "one # two\n");
+	});
+});
+
+describe("YAML frontmatter contract", () => {
+	it("decodes scalar and sequence comments without changing tool exclusions", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-yaml-comments-"));
+		tempDirs.push(dir);
+		writeAgent(path.join(dir, ".pi", "agents", "annotated.md"), `---
+name: annotated
+description: "Keeps # quoted"
+tools: read, write, bash # only these tools
+excludeTools:
+  - write # required restriction
+# explanation does not end the list
+  - bash
+---
+Body`);
+		const agent = discoverAgents(dir, "project").agents.find((item) => item.name === "annotated");
+		assert.equal(agent?.description, "Keeps # quoted");
+		assert.deepEqual(agent?.tools, ["read", "write", "bash"]);
+		assert.deepEqual(agent?.excludeTools, ["write", "bash"]);
+		const plan = resolvePiLaunchToolPlan({ tools: agent!.tools, excludeTools: agent!.excludeTools, agentName: "annotated" });
+		assert.deepEqual(plan.effectiveToolAllowlist, ["read"]);
+	});
+
+	it("preserves explicit false thinking across a management-style save", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-thinking-save-"));
+		tempDirs.push(dir);
+		const file = path.join(dir, ".pi", "agents", "thinking-off.md");
+		writeAgent(file, "---\nname: thinking-off\ndescription: No thinking\nthinking: false\n---\nBody");
+		const agent = discoverAgents(dir, "project").agents.find((item) => item.name === "thinking-off")!;
+		assert.equal(agent.thinking, false);
+		writeAgent(file, serializeAgent(agent, { preserveFrontmatterFields: new Set(["name", "description", "thinking"]) }));
+		assert.equal(discoverAgents(dir, "project").agents.find((item) => item.name === "thinking-off")?.thinking, false);
+	});
+
+	it("distinguishes blank outputSchema from explicit YAML null", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-empty-schema-"));
+		tempDirs.push(dir);
+		const file = path.join(dir, ".pi", "agents", "schema-placeholder.md");
+		writeAgent(file, "---\nname: schema-placeholder\ndescription: Schema placeholder\noutputSchema: # intentionally blank\n---\nBody");
+		const agent = discoverAgents(dir, "project").agents.find((item) => item.name === "schema-placeholder")!;
+		assert.equal(agent.outputSchema, undefined);
+		writeAgent(file, serializeAgent(agent, { preserveFrontmatterFields: new Set(["name", "description", "outputSchema"]) }));
+		assert.ok(discoverAgents(dir, "project").agents.some((item) => item.name === "schema-placeholder"));
+		for (const explicitNull of ["null", "~", '!!null ""', "!!null"]) {
+			writeAgent(file, `---\nname: schema-placeholder\ndescription: Schema placeholder\noutputSchema: ${explicitNull}\n---\nBody`);
+			assert.match(discoverAgents(dir, "project").agentDiagnostics?.find((item) => item.name === "schema-placeholder")?.error ?? "", /outputSchema must be a JSON Schema object/, explicitNull);
+		}
+	});
+
+	it("keeps blank structured fields unset but rejects explicit null declarations", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-null-fields-"));
+		tempDirs.push(dir);
+		const file = path.join(dir, ".pi", "agents", "optional-fields.md");
+		for (const field of ["runner", "acceptance", "permission", "permissions", "toolBudget"]) {
+			for (const blank of ["", "# intentionally unset", '""']) {
+				writeAgent(file, `---\nname: optional-fields\ndescription: Optional fields\n${field}: ${blank}\n---\nBody`);
+				const discovered = discoverAgents(dir, "project");
+				const agent = discovered.agents.find((item) => item.name === "optional-fields");
+				assert.ok(agent, `${field}: ${blank}`);
+				assert.deepEqual(discovered.agentDiagnostics, []);
+				writeAgent(file, serializeAgent(agent, { preserveFrontmatterFields: new Set([field]) }));
+				assert.ok(discoverAgents(dir, "project").agents.some((item) => item.name === "optional-fields"), `save ${field}: ${blank}`);
+			}
+			for (const explicitNull of ["null", "~", '!!null ""', "*nil"]) {
+				writeAgent(file, `---\nname: optional-fields\ndescription: Optional fields\nnil: &nil null\n${field}: ${explicitNull}\n---\nBody`);
+				const discovered = discoverAgents(dir, "project");
+				assert.equal(discovered.agents.some((item) => item.name === "optional-fields"), false, `${field}: ${explicitNull}`);
+				assert.ok(discovered.agentDiagnostics?.some((item) => item.name === "optional-fields"), `${field}: ${explicitNull}`);
+			}
+		}
+	});
+
+	it("preserves literal commas in sequence entries, unlike scalar CSV shorthand", () => {
+		const parsed = parseFrontmatter(`---
+tools: read, bash
+paths:
+  - "folder,with,commas"
+  - "notes #1.md" # annotation
+---
+Body`);
+		assert.deepEqual(parseFrontmatterList(parsed.frontmatter.tools), ["read", "bash"]);
+		assert.deepEqual(parseFrontmatterList(parsed.frontmatter.paths), ["folder,with,commas", "notes #1.md"]);
+		assert.deepEqual(parseFrontmatterList(parseFrontmatter('---\ntools: [read, bash]\n---\n').frontmatter.tools), ["read", "bash"]);
+	});
+
+	it("reports malformed YAML instead of silently changing a policy", () => {
+		for (const header of ["tools: read\\ntools: bash", 'description: "unterminated', "tools:\\n\\t- read"]) {
+			const yaml = header.replaceAll("\\n", "\n").replaceAll("\\t", "\t");
+			assert.throws(() => parseFrontmatter(`---\n${yaml}\n---\nBody`), /Invalid YAML frontmatter/);
+		}
+		assert.deepEqual(parseFrontmatter('---\ntools: # annotation\n---\n').frontmatter.tools, null);
+	});
+
+	it("requires exact delimiter lines and keeps Markdown body separate", () => {
+		assert.deepEqual(parseFrontmatter('---suffix\nname: x\n---\nBody').frontmatter, {});
+		assert.equal(parseFrontmatter('---\nname: x\n---suffix\nBody').body, '---\nname: x\n---suffix\nBody');
+		assert.equal(parseFrontmatter('---\r\nname: x\r\n---\r\nBody').frontmatter.name, 'x');
+		assert.equal(parseFrontmatter('\uFEFF--- \t\r\nname: x\r\n--- \t\r\nBody').frontmatter.name, 'x');
+	});
+
+	it("keeps YAML block-scalar trailing newlines when serializing", () => {
+		for (const [indicator, expected] of [["|", "first\nsecond\n"], ["|-", "first\nsecond"], ["|+", "first\nsecond\n\n"]] as const) {
+			const { frontmatter } = parseFrontmatter(`---\nname: multiline\ndescription: ${indicator}\n  first\n  second\n\n---\nBody`);
+			assert.equal(frontmatter.description, expected);
+			const serialized = serializeAgent({ name: "multiline", description: expected, source: "project", filePath: "/tmp/multiline.md", systemPrompt: "Body", systemPromptMode: "replace", inheritProjectContext: false, inheritSkills: false });
+			assert.equal(parseFrontmatter(serialized).frontmatter.description, expected);
+		}
+		for (const description of ["word ".repeat(30), "  first\nsecond", "\n", "\n\n"]) {
+			const serialized = serializeAgent({ name: "multiline", description, source: "project", filePath: "/tmp/multiline.md", systemPrompt: "Body", systemPromptMode: "replace", inheritProjectContext: false, inheritSkills: false });
+			assert.equal(parseFrontmatter(serialized).frontmatter.description, description);
+		}
+		const longRead = "dir/file has spaces ".repeat(8);
+		const serialized = serializeAgent({ name: "long-read", description: "Reader", source: "project", filePath: "/tmp/long-read.md", systemPrompt: "Body", systemPromptMode: "replace", inheritProjectContext: false, inheritSkills: false, defaultReads: [longRead] });
+		assert.deepEqual(parseFrontmatterList(parseFrontmatter(serialized).frontmatter.defaultReads), [longRead.trim()]);
+	});
+
+	it("saves quoted scalars and structured unknown metadata without changing meaning", () => {
+		const source = `---
+name: metadata
+description: "Keep # and: colon"
+notes:
+  enabled: true
+  label: "a,b"
+tools:
+  - read
+defaultReads:
+  - "a,b"
+---
+Body`;
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-yaml-roundtrip-"));
+		tempDirs.push(dir);
+		const file = path.join(dir, ".pi", "agents", "metadata.md");
+		writeAgent(file, source);
+		const agent = discoverAgents(dir, "project").agents.find((item) => item.name === "metadata");
+		assert.deepEqual(agent?.defaultReads, ["a,b"]);
+		writeAgent(file, serializeAgent(agent!));
+		const restored = discoverAgents(dir, "project").agents.find((item) => item.name === "metadata");
+		assert.equal(restored?.description, "Keep # and: colon");
+		assert.deepEqual(restored?.defaultReads, ["a,b"]);
+		assert.deepEqual(restored?.extraFields?.notes, { enabled: true, label: "a,b" });
+		const withTrailing = serializeAgent({ ...restored!, extraFields: { notes: "first\n\n" } });
+		assert.equal(parseFrontmatter(withTrailing).frontmatter.notes, "first\n\n");
+		writeAgent(file, serializeAgent({ ...restored!, memory: { scope: "project", path: "---cache" }, defaultReads: ["---notes,old.md"] }));
+		const markerValues = discoverAgents(dir, "project").agents.find((item) => item.name === "metadata");
+		assert.deepEqual(markerValues?.memory, { scope: "project", path: "---cache" });
+		assert.deepEqual(markerValues?.defaultReads, ["---notes,old.md"]);
+		for (const value of ['part"one\npart-two', `${"a".repeat(50)}\nsecond`]) {
+			writeAgent(file, serializeAgent({ ...restored!, defaultReads: [value], memory: { scope: "project", path: value } }));
+			const reloaded = discoverAgents(dir, "project").agents.find((item) => item.name === "metadata");
+			assert.deepEqual(reloaded?.defaultReads, [value]);
+			assert.equal(reloaded?.memory?.path, value);
+		}
 	});
 });
 
@@ -323,6 +477,9 @@ Review carefully.`.replace(" description:", "description:"));
 		assert.deepEqual(external.runner, { type: "external-cli", command: process.execPath, args: ["-e", "process.stdin.pipe(process.stdout)"], promptDelivery: "stdin" });
 		assert.match(serializeAgent(external), /runner:\n  type: external-cli\n  command:/);
 		assert.deepEqual(discoverAgents(project, "project").agents.find((agent) => agent.name === "external")?.runner, external.runner);
+		const runner = { type: "external-cli" as const, command: process.execPath, args: ["---cache", "first\n\n"] };
+		writeAgent(path.join(project, ".pi", "agents", "external.md"), serializeAgent({ ...external, runner }));
+		assert.deepEqual(discoverAgents(project, "project").agents.find((agent) => agent.name === "external")?.runner, runner);
 	}));
 
 	it("keeps external-cli stop code-owned while refusing capability widening", () => withTempHome(() => {
@@ -433,6 +590,24 @@ Review carefully.`);
 		assert.equal(discovered.agentDiagnostics?.find((diagnostic) => diagnostic.name === "reviewer")?.source, "project");
 	}));
 
+	it("blocks a higher-priority YAML syntax error by diagnostic identity", () => withTempHome(() => {
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-invalid-yaml-shadow-"));
+		tempDirs.push(project);
+		writeAgent(path.join(project, ".pi", "agents", "reviewer.md"), "---\nname: reviewer\ndescription: Broken override\ntools: read\ntools: bash\n---\nBody");
+		const discovered = discoverAgents(project, "both");
+		assert.equal(discovered.agents.find((agent) => agent.name === "reviewer")?.source, "builtin");
+		assert.match(discovered.agentDiagnostics?.find((diagnostic) => diagnostic.name === "reviewer")?.error ?? "", /Map keys must be unique/i);
+	}));
+
+	it("keeps a quoted package identity for a YAML syntax diagnostic", () => withTempHome(() => {
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-invalid-yaml-package-"));
+		tempDirs.push(project);
+		writeAgent(path.join(project, ".pi", "agents", "broken.md"), '---\nname: "zeta-worker"\npackage: "code-analysis"\ndescription: Broken\ntools: read\ntools: bash\n---\nBody');
+		const diagnostic = discoverAgents(project, "project").agentDiagnostics?.find((item) => item.name === "zeta-worker");
+		assert.equal(diagnostic?.runtimeName, "code-analysis.zeta-worker");
+		assert.equal(diagnostic?.packageSpecified, true);
+	}));
+
 	it("records the runtime name for malformed packaged agents", () => withTempHome(() => {
 		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-invalid-packaged-agent-"));
 		tempDirs.push(project);
@@ -490,6 +665,20 @@ body`);
 });
 
 describe("agent aliases", () => {
+	it("honors explicitly empty aliases over the singular alias field", () => withTempHome(() => {
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-empty-aliases-"));
+		tempDirs.push(project);
+		const file = path.join(project, ".pi", "agents", "alias-worker.md");
+		for (const aliases of ["aliases:", 'aliases: ""', "aliases: []"]) {
+			writeAgent(file, `---\nname: alias-worker\ndescription: Worker\n${aliases}\nalias: old-route\n---\nBody`);
+			const agent = discoverAgents(project, "project").agents.find((item) => item.name === "alias-worker");
+			assert.ok(agent, aliases);
+			assert.equal(agent.aliases, undefined, aliases);
+		}
+		writeAgent(file, "---\nname: alias-worker\ndescription: Worker\nalias: old-route\n---\nBody");
+		assert.deepEqual(discoverAgents(project, "project").agents.find((item) => item.name === "alias-worker")?.aliases, ["old-route"]);
+	}));
+
 	it("parses and serializes agent aliases", () => withTempHome(() => {
 		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-alias-agent-"));
 		tempDirs.push(project);
@@ -2156,7 +2345,7 @@ Review
 		fs.mkdirSync(chainsDir, { recursive: true });
 		fs.writeFileSync(path.join(agentsDir, "scout.md"), `---
 name: scout
-package: !!!
+package: "!!!"
 description: Fast recon
 ---
 
@@ -2164,7 +2353,7 @@ Inspect
 `, "utf-8");
 		fs.writeFileSync(path.join(chainsDir, "review.chain.md"), `---
 name: review-flow
-package: !!!
+package: "!!!"
 description: Review flow
 ---
 
@@ -2175,7 +2364,7 @@ Review
 
 		const result = discoverAgentsAll(dir);
 		assert.equal(result.project.some((agent) => agent.filePath.endsWith("scout.md")), false);
-		assert.match(result.agentDiagnostics?.find((diagnostic) => diagnostic.filePath.endsWith("scout.md"))?.error ?? "", /Agent 'scout' package is invalid after sanitization/);
+		assert.match(result.agentDiagnostics?.find((diagnostic) => diagnostic.filePath.endsWith("scout.md"))?.error ?? "", /package is invalid after sanitization/);
 		assert.equal(result.chains.some((chain) => chain.filePath.endsWith("review.chain.md")), false);
 	});
 });

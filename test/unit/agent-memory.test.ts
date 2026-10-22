@@ -14,6 +14,7 @@ import {
 	resolveMemoryDir,
 } from "../../src/agents/agent-memory.ts";
 import { serializeAgent } from "../../src/agents/agent-serializer.ts";
+import { parseFrontmatter } from "../../src/agents/frontmatter.ts";
 import { discoverAgents, findNearestProjectRoot, type AgentConfig, type AgentMemoryConfig } from "../../src/agents/agents.ts";
 import { handleManagementAction } from "../../src/agents/agent-management.ts";
 
@@ -88,37 +89,38 @@ afterEach(() => {
 });
 
 describe("parseMemoryFrontmatter", () => {
+	const memoryOf = (value: string) => parseMemoryFrontmatter(parseFrontmatter(`---\nmemory: ${value.replaceAll("\n", "\n  ")}\n---\n`).frontmatter.memory);
 	it("parses a project scope block", () => {
-		assert.deepEqual(parseMemoryFrontmatter("scope: project\npath: security-reviewer"), {
+		assert.deepEqual(memoryOf("\n  scope: project\n  path: security-reviewer"), {
 			scope: "project",
 			path: "security-reviewer",
 		});
 	});
 
 	it("parses a user scope with nested path and strips quotes", () => {
-		assert.deepEqual(parseMemoryFrontmatter('scope: user\npath: "team/release-agent"'), {
+		assert.deepEqual(memoryOf('\n  scope: user\n  path: "team/release-agent"'), {
 			scope: "user",
 			path: "team/release-agent",
 		});
 	});
 
 	it("parses an inline object memory block", () => {
-		assert.deepEqual(parseMemoryFrontmatter('{ scope: "project", path: "security-reviewer" }'), {
+		assert.deepEqual(memoryOf('{ scope: "project", path: "security-reviewer" }'), {
 			scope: "project",
 			path: "security-reviewer",
 		});
 	});
 
 	it("rejects unknown scopes", () => {
-		assert.equal(parseMemoryFrontmatter("scope: global\npath: x"), undefined);
+		assert.equal(memoryOf("\n  scope: global\n  path: x"), undefined);
 	});
 
 	it("rejects a missing path", () => {
-		assert.equal(parseMemoryFrontmatter("scope: project"), undefined);
+		assert.equal(memoryOf("\n  scope: project"), undefined);
 	});
 
 	it("rejects a missing scope", () => {
-		assert.equal(parseMemoryFrontmatter("path: x"), undefined);
+		assert.equal(memoryOf("\n  path: x"), undefined);
 	});
 
 	it("treats empty or absent input as no memory config", () => {

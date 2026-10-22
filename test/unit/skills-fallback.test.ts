@@ -82,9 +82,9 @@ describe("skills filesystem fallback", () => {
 
 	it("reads block scalar descriptions for discovery and child injection", () => {
 		const cases = [
-			["|", "first line\nsecond line"],
+			["|", "first line\nsecond line\n"],
 			["|-", "first line\nsecond line"],
-			[">", "first line second line"],
+			[">", "first line second line\n"],
 			[">-", "first line second line"],
 		] as const;
 
@@ -101,6 +101,12 @@ describe("skills filesystem fallback", () => {
 			assert.deepEqual(missing, []);
 			assert.match(buildSkillInjection(resolved), new RegExp(`<description>${description.replace("\n", "\\n")}</description>`));
 		}
+	});
+
+	it("does not advertise an invalid skill without its hidden-skill policy", () => {
+		makeProjectSkill(tempDir, "invalid-hidden", "User-only content.", "[private]\ndisable-model-invocation: true");
+		assert.equal(discoverAvailableSkills(tempDir).some((skill) => skill.name === "invalid-hidden"), false);
+		assert.deepEqual(resolveSkills(["invalid-hidden"], tempDir).missing, ["invalid-hidden"]);
 	});
 
 	it("discovers project skills nested below grouping directories", () => {

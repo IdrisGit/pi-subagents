@@ -59,6 +59,17 @@ describe("disable-model-invocation filtering", () => {
 		assert.equal(visible?.disableModelInvocation, undefined);
 	});
 
+	it("keeps hidden-skill policy with trailing whitespace on delimiter lines", () => {
+		const skillDir = path.join(tempDir, ".pi", "skills", "hidden-spaced");
+		fs.mkdirSync(skillDir, { recursive: true });
+		fs.writeFileSync(path.join(skillDir, "SKILL.md"), "--- \t\ndescription: Private skill\ndisable-model-invocation: true\n--- \t\nUser-only instructions.\n", "utf-8");
+		assert.equal(discoverAvailableSkills(tempDir).find((skill) => skill.name === "hidden-spaced")?.disableModelInvocation, true);
+		const { resolved, missing } = resolveSkills(["hidden-spaced"], tempDir);
+		assert.deepEqual(missing, []);
+		assert.equal(resolved[0]?.disableModelInvocation, true);
+		assert.equal(buildSkillInjection(resolved), "");
+	});
+
 	it("still resolves hidden skills when they are named explicitly", () => {
 		makeProjectSkill(tempDir, "hidden-skill", "User-only skill body.", { disableModelInvocation: true });
 

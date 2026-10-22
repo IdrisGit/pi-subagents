@@ -1,6 +1,7 @@
 import type { ChainConfig, ChainStepConfig } from "./agents.ts";
 import { buildRuntimeName, frontmatterNameForConfig, parsePackageName } from "./identity.ts";
-import { parseFrontmatter } from "./frontmatter.ts";
+import { frontmatterScalar, parseFrontmatter } from "./frontmatter.ts";
+import { stringify as stringifyYaml } from "yaml";
 import { ChainOutputValidationError, validateChainOutputBindings } from "../runs/shared/chain-outputs.ts";
 import { validateAcceptanceInput } from "../runs/shared/acceptance.ts";
 import { validateToolBudgetConfig } from "../runs/shared/tool-budget.ts";
@@ -107,7 +108,9 @@ function parseStepBody(agent: string, sectionBody: string): ChainStepConfig {
 
 export function parseChain(content: string, source: AgentSource, filePath: string): ChainConfig {
 	const { frontmatter, body } = parseFrontmatter(content);
-	if (!frontmatter.name || !frontmatter.description) {
+	const name = frontmatterScalar(frontmatter.name, "name");
+	const description = frontmatterScalar(frontmatter.description, "description");
+	if (!name || !description) {
 		throw new Error("Chain frontmatter must include name and description");
 	}
 
@@ -124,11 +127,11 @@ export function parseChain(content: string, source: AgentSource, filePath: strin
 		steps.push(parseStepBody(agent, sectionBody));
 	}
 
-	const localName = frontmatter.name;
-	const parsedPackage = parsePackageName(frontmatter.package, `Chain '${localName}' package`);
+	const localName = name;
+	const parsedPackage = parsePackageName(frontmatterScalar(frontmatter.package, "package"), `Chain '${localName}' package`);
 	if (parsedPackage.error) throw new Error(parsedPackage.error);
 	const packageName = parsedPackage.packageName;
-	const extraFields: Record<string, string> = {};
+	const extraFields: Record<string, unknown> = {};
 	for (const [key, value] of Object.entries(frontmatter)) {
 		if (key === "name" || key === "package" || key === "description") continue;
 		extraFields[key] = value;
@@ -138,7 +141,7 @@ export function parseChain(content: string, source: AgentSource, filePath: strin
 		name: buildRuntimeName(localName, packageName),
 		localName,
 		...(packageName !== undefined ? { packageName } : {}),
-		description: frontmatter.description,
+		description,
 		source,
 		filePath,
 		steps,
@@ -212,10 +215,10 @@ export function parseJsonChain(content: string, source: AgentSource, filePath: s
 	}
 	const parsedPackage = parsePackageName(typeof input.package === "string" ? input.package : undefined, `Chain '${input.name}' package`);
 	if (parsedPackage.error) throw new Error(parsedPackage.error);
-	const extraFields: Record<string, string> = {};
+	const extraFields: Record<string, unknown> = {};
 	for (const [key, value] of Object.entries(input)) {
 		if (key === "name" || key === "package" || key === "description" || key === "chain") continue;
-		if (typeof value === "string") extraFields[key] = value;
+		extraFields[key] = value;
 	}
 	return {
 		name: buildRuntimeName(input.name.trim(), parsedPackage.packageName),
@@ -247,14 +250,15 @@ export function serializeJsonChain(config: ChainConfig): string {
 export function serializeChain(config: ChainConfig): string {
 	const lines: string[] = [];
 	lines.push("---");
-	lines.push(`name: ${frontmatterNameForConfig(config)}`);
-	if (config.packageName) lines.push(`package: ${config.packageName}`);
-	lines.push(`description: ${config.description}`);
+	const header: Record<string, unknown> = { name: frontmatterNameForConfig(config), description: config.description };
+	if (config.packageName) header.package = config.packageName;
 	if (config.extraFields) {
 		for (const [key, value] of Object.entries(config.extraFields)) {
-			lines.push(`${key}: ${value}`);
+			if (key !== "name" && key !== "package" && key !== "description") header[key] = value;
 		}
 	}
+	const renderedHeader = stringifyYaml(header);
+	lines.push(renderedHeader.slice(0, -1));
 	lines.push("---");
 	lines.push("");
 

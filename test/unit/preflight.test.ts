@@ -607,6 +607,87 @@ Project prompt.
 		assert.notEqual(after.contract.digest, before.contract.digest);
 	});
 
+	it("rejects malformed project overrides instead of launching a lower-priority agent", async () => {
+		const cwd = path.join(tempDir, "repo");
+		fs.mkdirSync(cwd, { recursive: true });
+		const file = path.join(cwd, ".pi", "agents", "worker.md");
+		for (const yaml of [
+			"name:  worker\ndescription: Restricted worker\ntools: read\ntools: bash",
+			"name: \"worker\" # named override\ndescription: Restricted worker\ntools: read\ntools: bash",
+			"name:   worker\ndescription: Restricted worker\nfast: {bad: true}",
+			"name: worker\nname: worker\ndescription: Restricted worker\ntools: read",
+			"identity: &id worker\nname: *id\ndescription: Restricted worker\ntools: read\ntools: bash",
+			"name: worker\ndescription: null\ntools: read",
+		]) {
+			writeAgent(file, `---\n${yaml}\n---\nRestricted prompt.`);
+			const resolved = await resolveSubagentLaunchContract({ agent: "worker", cwd, agentScope: "both" });
+			assert.equal(resolved.ok, false, `invalid project override must block the builtin: ${yaml}`);
+			assert.match(resolved.message, /Agent 'worker' has invalid configuration/);
+		}
+	});
+
+	it("keeps package identity when a description is invalid without blocking the local agent", async () => {
+		const cwd = path.join(tempDir, "repo");
+		fs.mkdirSync(cwd, { recursive: true });
+		writeAgent(path.join(process.env.PI_CODING_AGENT_DIR!, "agents", "team.worker.md"), "---\nname: worker\npackage: team\ndescription: User worker\n---\nUser prompt.");
+		assert.equal((await resolveSubagentLaunchContract({ agent: "team.worker", cwd, agentScope: "both" })).ok, true);
+		for (const invalid of [
+			"name: worker\npackage: team\ndescription: [bad]",
+			"name: worker\npackage: team\ndescription: null",
+			"name: worker\npackageId: &p team\npackage: *p\ndescription: Restricted worker\ntools: read\ntools: bash",
+		]) {
+			writeAgent(path.join(cwd, ".pi", "agents", "team.worker.md"), `---\n${invalid}\n---\nRestricted project prompt.`);
+			const qualified = await resolveSubagentLaunchContract({ agent: "team.worker", cwd, agentScope: "both" });
+			assert.equal(qualified.ok, false);
+			assert.match(qualified.message, /Agent 'team\.worker' has invalid configuration/);
+			assert.equal((await resolveSubagentLaunchContract({ agent: "worker", cwd, agentScope: "both" })).ok, true);
+		}
+	});
+
+	it("recovers scalar and repeated identical identities only for blocking invalid overrides", async () => {
+		const cwd = path.join(tempDir, "repo");
+		fs.mkdirSync(cwd, { recursive: true });
+		for (const identity of ["name: 123", "name: false", "name: writer\npackage: team"]) {
+			const requested = identity.includes("package:") ? "team.writer" : identity.slice("name: ".length);
+			writeAgent(path.join(process.env.PI_CODING_AGENT_DIR!, "agents", `${requested}.md`), `---\n${identity}\ndescription: Valid user agent\n---\nUser prompt.`);
+			assert.equal((await resolveSubagentLaunchContract({ agent: requested, cwd, agentScope: "both" })).ok, true);
+			const file = path.join(cwd, ".pi", "agents", `${requested}.md`);
+			for (const invalid of [
+				`${identity}\ndescription: Restricted\ntools: read\ntools: bash`,
+				`${identity}\n${identity}\ndescription: Restricted\ntools: read`,
+			]) {
+				writeAgent(file, `---\n${invalid}\n---\nRestricted prompt.`);
+				const resolved = await resolveSubagentLaunchContract({ agent: requested, cwd, agentScope: "both" });
+				assert.equal(resolved.ok, false, invalid);
+				assert.ok(resolved.message.includes(`Agent '${requested}' has invalid configuration`), resolved.message);
+			}
+		}
+	});
+
+	it("rejects empty or null launcher declarations rather than removing the wrapper", async () => {
+		const cwd = path.join(tempDir, "repo");
+		fs.mkdirSync(cwd, { recursive: true });
+		const file = path.join(cwd, ".pi", "agents", "worker.md");
+		for (const value of ["", '""', "null", "~", '!!null ""']) {
+			writeAgent(file, `---\nname: worker\ndescription: Sandboxed worker\nlauncher: ${value}\n---\nRestricted prompt.`);
+			const resolved = await resolveSubagentLaunchContract({ agent: "worker", cwd, agentScope: "both" });
+			assert.equal(resolved.ok, false, `launcher: ${value}`);
+			assert.match(resolved.message, /frontmatter 'launcher'.*is invalid/);
+		}
+	});
+
+	it("does not launch an agent whose declared runner or policy is explicit null", async () => {
+		const cwd = path.join(tempDir, "repo");
+		fs.mkdirSync(cwd, { recursive: true });
+		const file = path.join(cwd, ".pi", "agents", "worker.md");
+		for (const field of ["runner", "acceptance", "permissions", "toolBudget"]) {
+			writeAgent(file, `---\nname: worker\ndescription: Restricted worker\n${field}: null\n---\nRestricted prompt.`);
+			const resolved = await resolveSubagentLaunchContract({ agent: "worker", cwd, agentScope: "both" });
+			assert.equal(resolved.ok, false, field);
+			assert.match(resolved.message, /Agent 'worker' has invalid configuration/);
+		}
+	});
+
 	it("returns closed failures for missing agents and missing skills", async () => {
 		const cwd = path.join(tempDir, "repo");
 		fs.mkdirSync(cwd, { recursive: true });
@@ -698,7 +779,7 @@ User prompt.
 `);
 		writeAgent(path.join(cwd, ".pi", "agents", "package-shadow.md"), `---
 name: package-shadow
-package: !!!
+package: "!!!"
 description: Broken package shadow
 ---
 Broken prompt.

@@ -68,6 +68,34 @@ Project body $1
 		assert.equal(workflow?.model, "openai/gpt-5-mini");
 	});
 
+	it("isolates malformed prompts without falling back past an invalid override", async () => {
+		writePrompt(path.join(agentDir, "prompts"), "shadowed", "---\ndescription: Valid user prompt\n---\nUser body");
+		writePrompt(path.join(cwd, ".pi", "prompts"), "shadowed", '---\ndescription: "unterminated\n---\nBroken project body');
+		writePrompt(path.join(cwd, ".pi", "prompts"), "good", "---\ndescription: Good prompt\n---\nGood body");
+		const names = discoverPromptWorkflows(cwd).map((entry) => entry.name);
+		assert.ok(names.includes("good"));
+		assert.equal(names.includes("shadowed"), false);
+
+		const commands = new Map<string, { handler: (args: string, ctx: never) => Promise<void> }>();
+		const sent: Array<{ content?: string }> = [];
+		const runs: SubagentParamsLike[] = [];
+		registerPromptWorkflowCommands({
+			pi: {
+				registerCommand: (name: string, command: { handler: (args: string, ctx: never) => Promise<void> }) => commands.set(name, command),
+				sendMessage: (message: { content?: string }) => sent.push(message),
+			} as never,
+			run: async (params) => { runs.push(params); },
+		});
+		const ctx = makeCtx(cwd) as { ui: { notifications: Array<{ message: string; level: string }> } };
+		await commands.get("prompt-workflow")!.handler("list", ctx as never);
+		assert.match(sent[0]?.content ?? "", /good: Good prompt/);
+		assert.match(sent[0]?.content ?? "", /Invalid prompt workflow 'shadowed'/);
+		await commands.get("prompt-workflow")!.handler("shadowed", ctx as never);
+		assert.match(ctx.ui.notifications[0]?.message ?? "", /Invalid prompt workflow 'shadowed'/);
+		await commands.get("prompt-workflow")!.handler("good", ctx as never);
+		assert.equal(runs.length, 1);
+	});
+
 	it("discovers symlinked prompt files and skips dangling links", () => {
 		const promptsDir = path.join(agentDir, "prompts");
 		writePrompt(path.join(tempDir, "dotfiles"), "linked", `---

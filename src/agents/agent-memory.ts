@@ -26,38 +26,13 @@ const MAX_GITDIR_FILE_BYTES = 4 * 1024;
 
 const WRITE_TOOLS = new Set(["edit", "write", "bash"]);
 
-function unquoteFrontmatterValue(value: string): string {
-	const trimmed = value.trim();
-	if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
-		return trimmed.slice(1, -1);
-	}
-	return trimmed;
-}
-
-/** Parse a `memory` frontmatter block string into a typed config, or undefined if invalid. */
-export function parseMemoryFrontmatter(raw: string | undefined): AgentMemoryConfig | undefined {
-	if (!raw) return undefined;
-	const entries = new Map<string, string>();
-	const trimmed = raw.trim();
-	const inlineObject = trimmed.match(/^\{(.*)\}$/s);
-	if (inlineObject) {
-		for (const part of inlineObject[1]!.split(",")) {
-			const match = part.trim().match(/^([\w-]+)\s*:\s*(.*)$/);
-			if (!match) continue;
-			entries.set(match[1]!, unquoteFrontmatterValue(match[2]!));
-		}
-	} else {
-		for (const line of raw.split("\n")) {
-			const match = line.match(/^\s*([\w-]+):\s*(.*)$/);
-			if (!match) continue;
-			entries.set(match[1]!, unquoteFrontmatterValue(match[2]!));
-		}
-	}
-	const scope = entries.get("scope");
-	const scopedPath = entries.get("path");
-	if (scope !== "project" && scope !== "user") return undefined;
-	if (!scopedPath) return undefined;
-	return { scope, path: scopedPath };
+/** Validate the decoded YAML mapping for the optional memory scope. */
+export function parseMemoryFrontmatter(value: unknown): AgentMemoryConfig | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const entries = value as Record<string, unknown>;
+	if (entries.scope !== "project" && entries.scope !== "user") return undefined;
+	if (typeof entries.path !== "string" || !entries.path) return undefined;
+	return { scope: entries.scope, path: entries.path };
 }
 
 /** Whether an agent can write files this run (inherits default builtins when `tools` is unset). */

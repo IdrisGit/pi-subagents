@@ -15,6 +15,32 @@ Review the diff
 `;
 
 describe("chain serializer", () => {
+	it("round-trips quoted descriptions and structured unknown YAML metadata", () => {
+		const parsed = parseChain(`---
+name: review-chain
+description: "Keep # and: colon"
+notes:
+  label: "a,b"
+---
+
+## reviewer
+
+Review the diff
+`, "project", "/tmp/review-chain.md");
+		const restored = parseChain(serializeChain(parsed), "project", "/tmp/review-chain.md");
+		assert.equal(restored.description, "Keep # and: colon");
+		assert.deepEqual(restored.extraFields?.notes, { label: "a,b" });
+		const jsonRestored = parseJsonChain(serializeJsonChain(parsed), "project", "/tmp/review-chain.chain.json");
+		assert.deepEqual(jsonRestored.extraFields, parsed.extraFields);
+		const markdownRestored = parseChain(serializeChain(jsonRestored), "project", "/tmp/review-chain.md");
+		assert.deepEqual(markdownRestored.extraFields, parsed.extraFields);
+		for (const description of ["first\n\n", "  first\nsecond", "\n"]) {
+			const saved = serializeChain({ ...parsed, description, extraFields: { notes: "first\n\n" } });
+			const reloaded = parseChain(saved, "project", "/tmp/review-chain.md");
+			assert.equal(reloaded.description, description);
+			assert.equal(reloaded.extraFields?.notes, "first\n\n");
+		}
+	});
 	it("round-trips step outputMode", () => {
 		const parsed = parseChain(chainContent, "project", "/tmp/review-chain.md");
 

@@ -48,9 +48,29 @@ export const KNOWN_FIELDS = new Set([
 	"runner",
 ]);
 
-function joinComma(values: string[] | undefined): string | undefined {
-	if (!values || values.length === 0) return undefined;
-	return values.join(", ");
+function yamlString(value: string): string {
+	// This scalar is embedded after a mapping key or sequence marker, so the
+	// emitter must not choose a root-level block scalar or wrap onto new lines.
+	return stringifyYaml(value, { lineWidth: 0, blockQuote: false, singleQuote: false, doubleQuotedAsJSON: true }).slice(0, -1);
+}
+
+/** Remove only the YAML emitter's final line break, never block-scalar content. */
+function yamlMappingLines(value: Record<string, unknown>): string[] {
+	const rendered = stringifyYaml(value);
+	return rendered.slice(0, -1).split("\n");
+}
+
+function emitList(lines: string[], key: string, values: string[] | undefined, force = false): void {
+	if (!values?.length) {
+		if (force) lines.push(`${key}:`);
+		return;
+	}
+	if (values.some((value) => value.includes(",") || value.includes("\n"))) {
+		lines.push(`${key}:`);
+		for (const value of values) lines.push(`  - ${yamlString(value)}`);
+	} else {
+		lines.push(`${key}: ${yamlString(values.join(", "))}`);
+	}
 }
 
 interface SerializeAgentOptions {
@@ -62,37 +82,29 @@ export function serializeAgent(config: AgentConfig, options: SerializeAgentOptio
 	const preserve = (...fields: string[]) => fields.some((field) => options.preserveFrontmatterFields?.has(field));
 	const preservingExistingFrontmatter = options.preserveFrontmatterFields !== undefined;
 	lines.push("---");
-	lines.push(`name: ${frontmatterNameForConfig(config)}`);
-	if (config.packageName) lines.push(`package: ${config.packageName}`);
-	if (config.description.includes("\n")) {
-		lines.push("description: |-");
-		for (const line of config.description.split("\n")) lines.push(`  ${line}`);
-	} else {
-		lines.push(`description: ${config.description}`);
-	}
+	lines.push(`name: ${yamlString(frontmatterNameForConfig(config))}`);
+	if (config.packageName) lines.push(`package: ${yamlString(config.packageName)}`);
+	lines.push(...yamlMappingLines({ description: config.description }));
 	if (config.advertise === true || preserve("advertise")) lines.push(`advertise: ${config.advertise === true ? "true" : "false"}`);
-	const aliasesValue = joinComma(config.aliases);
-	if (aliasesValue || preserve("alias", "aliases")) lines.push(`aliases: ${aliasesValue ?? ""}`);
+	emitList(lines, "aliases", config.aliases, preserve("alias", "aliases"));
 
 	const tools = [
 		...(config.tools ?? []),
 		...(config.mcpDirectTools ?? []).map((tool) => `mcp:${tool}`),
 	];
-	const toolsValue = joinComma(tools);
-	if (toolsValue || preserve("tools")) lines.push(`tools: ${toolsValue ?? ""}`);
-	const excludeToolsValue = joinComma(config.excludeTools);
-	if (excludeToolsValue || preserve("excludeTools")) lines.push(`excludeTools: ${excludeToolsValue ?? ""}`);
+	emitList(lines, "tools", tools, preserve("tools"));
+	emitList(lines, "excludeTools", config.excludeTools, preserve("excludeTools"));
 	if (config.allowNestedSubagents === true || preserve("allowNestedSubagents")) {
 		lines.push(`allowNestedSubagents: ${config.allowNestedSubagents === undefined ? "" : config.allowNestedSubagents ? "true" : "false"}`);
 	}
 	if (config.allowedAgents !== undefined || preserve("allowedAgents")) {
-		lines.push(`allowedAgents: ${joinComma(config.allowedAgents) ?? ""}`);
+		emitList(lines, "allowedAgents", config.allowedAgents, true);
 	}
 
-	if (config.model || preserve("model")) lines.push(`model: ${config.model ?? ""}`);
+	if (config.model || preserve("model")) lines.push(`model: ${config.model ? yamlString(config.model) : ""}`);
 	if (config.fast === true || preserve("fast")) lines.push(`fast: ${config.fast === undefined ? "" : config.fast ? "true" : "false"}`);
 	if ((config.thinking && (config.thinking !== "off" || preserve("thinking"))) || (!config.thinking && preserve("thinking"))) {
-		lines.push(`thinking: ${config.thinking ?? ""}`);
+		lines.push(`thinking: ${config.thinking === false ? "false" : config.thinking ? yamlString(config.thinking) : ""}`);
 	}
 	if (!preservingExistingFrontmatter || preserve("systemPromptMode")) lines.push(`systemPromptMode: ${config.systemPromptMode}`);
 	if (!preservingExistingFrontmatter || preserve("inheritProjectContext")) lines.push(`inheritProjectContext: ${config.inheritProjectContext ? "true" : "false"}`);
@@ -101,8 +113,7 @@ export function serializeAgent(config: AgentConfig, options: SerializeAgentOptio
 	if (config.defaultContext || preserve("defaultContext")) lines.push(`defaultContext: ${config.defaultContext ?? ""}`);
 	if (config.runner || preserve("runner")) {
 		if (config.runner) {
-			lines.push("runner:");
-			for (const line of stringifyYaml(config.runner).trimEnd().split("\n")) lines.push(`  ${line}`);
+			lines.push(...yamlMappingLines({ runner: config.runner }));
 		} else {
 			lines.push("runner:");
 		}
@@ -119,30 +130,24 @@ export function serializeAgent(config: AgentConfig, options: SerializeAgentOptio
 	}
 	if (config.acceptanceRole || preserve("acceptanceRole")) lines.push(`acceptanceRole: ${config.acceptanceRole ?? ""}`);
 
-	const skillsValue = joinComma(config.skills);
-	if (skillsValue || preserve("skill", "skills")) lines.push(`skills: ${skillsValue ?? ""}`);
-	const skillPathValue = joinComma(config.skillPath);
-	if (skillPathValue || preserve("skillPath")) lines.push(`skillPath: ${skillPathValue ?? ""}`);
+	emitList(lines, "skills", config.skills, preserve("skill", "skills"));
+	emitList(lines, "skillPath", config.skillPath, preserve("skillPath"));
 
 	if (config.extensions !== undefined) {
-		const extensionsValue = joinComma(config.extensions);
-		lines.push(`extensions: ${extensionsValue ?? ""}`);
+		emitList(lines, "extensions", config.extensions, true);
 	}
 	if (config.subagentOnlyExtensions !== undefined || preserve("subagentOnlyExtensions")) {
-		const subagentOnlyExtensionsValue = joinComma(config.subagentOnlyExtensions);
-		lines.push(`subagentOnlyExtensions: ${subagentOnlyExtensionsValue ?? ""}`);
+		emitList(lines, "subagentOnlyExtensions", config.subagentOnlyExtensions, true);
 	}
-	const mutationToolsValue = joinComma(config.mutationTools);
-	if (mutationToolsValue || preserve("mutationTools")) lines.push(`mutationTools: ${mutationToolsValue ?? ""}`);
+	emitList(lines, "mutationTools", config.mutationTools, preserve("mutationTools"));
 
-	if (config.machine || preserve("machine")) lines.push(`machine: ${config.machine ?? ""}`);
-	if (config.launcher) lines.push(`launcher: ${config.launcher}`);
-	if (config.output || preserve("output")) lines.push(`output: ${config.output ?? ""}`);
+	if (config.machine || preserve("machine")) lines.push(`machine: ${config.machine ? yamlString(config.machine) : ""}`);
+	if (config.launcher) lines.push(`launcher: ${yamlString(config.launcher)}`);
+	if (config.output || preserve("output")) lines.push(`output: ${config.output ? yamlString(config.output) : ""}`);
 	if (config.outputMode || preserve("outputMode")) lines.push(`outputMode: ${config.outputMode ?? ""}`);
 	if (config.outputSchema || preserve("outputSchema")) lines.push(`outputSchema: ${config.outputSchema ? JSON.stringify(config.outputSchema) : ""}`);
 
-	const readsValue = joinComma(config.defaultReads);
-	if (readsValue || preserve("defaultReads")) lines.push(`defaultReads: ${readsValue ?? ""}`);
+	emitList(lines, "defaultReads", config.defaultReads, preserve("defaultReads"));
 
 	if (config.defaultProgress) lines.push("defaultProgress: true");
 	if (config.interactive) lines.push("interactive: true");
@@ -155,30 +160,23 @@ export function serializeAgent(config: AgentConfig, options: SerializeAgentOptio
 	}
 	if (config.permissions || preserve("permission", "permissions")) {
 		const key = preserve("permission") && !preserve("permissions") ? "permission" : "permissions";
-		lines.push(`${key}:`);
 		if (config.permissions) {
-			for (const line of stringifyYaml(config.permissions).trimEnd().split("\n")) lines.push(`  ${line}`);
+			lines.push(...yamlMappingLines({ [key]: config.permissions }));
+		} else {
+			lines.push(`${key}:`);
 		}
 	}
 
 	if (config.memory) {
 		lines.push("memory:");
 		lines.push(`  scope: ${config.memory.scope}`);
-		lines.push(`  path: ${config.memory.path}`);
+		lines.push(`  path: ${yamlString(config.memory.path)}`);
 	}
 
 	if (config.extraFields) {
 		for (const [key, value] of Object.entries(config.extraFields)) {
 			if (KNOWN_FIELDS.has(key)) continue;
-			if (typeof value === "string" && value.includes("\n")) {
-				// Multi-line block value (e.g. permission: nested YAML)
-				lines.push(`${key}:`);
-				for (const blockLine of value.split("\n")) {
-					lines.push(`  ${blockLine}`);
-				}
-			} else {
-				lines.push(`${key}: ${value}`);
-			}
+			lines.push(...yamlMappingLines({ [key]: value }));
 		}
 	}
 

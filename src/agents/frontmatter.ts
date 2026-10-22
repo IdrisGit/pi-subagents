@@ -1,160 +1,106 @@
-/**
- * Escape regex special characters for use in a RegExp constructor.
- */
-function escapeRegex(s: string): string {
-	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+import { isAlias, isMap, isScalar, parseDocument } from "yaml";
+
+/** A decoded YAML mapping. Field-specific policy belongs to its consumer. */
+export type Frontmatter = Record<string, unknown>;
+
+/** Read a scalar field without interpreting its decoded contents as YAML again. */
+export function frontmatterScalar(value: unknown, field: string): string | undefined {
+	if (value === undefined || value === null) return undefined;
+	if (typeof value === "string") return value;
+	if (typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) return String(value);
+	throw new Error(`Frontmatter '${field}' must be a scalar value.`);
 }
 
-/**
- * Fold a YAML folded block scalar while preserving more-indented lines and
- * every blank-line separator. Trailing whitespace is trimmed.
- */
-function foldBlock(block: string): string {
-	let folded = "";
-	let hasContent = false;
-	let previousIsMoreIndented = false;
-	let blankLines = 0;
-
-	for (const line of block.split("\n")) {
-		const current = line.trimEnd();
-		if (current.trim() === "") {
-			if (hasContent) blankLines++;
-			continue;
-		}
-
-		const currentIsMoreIndented = current.length > current.trimStart().length;
-		if (hasContent) {
-			if (blankLines > 0) {
-				folded += "\n".repeat(blankLines + (previousIsMoreIndented || currentIsMoreIndented ? 1 : 0));
-			} else {
-				folded += previousIsMoreIndented || currentIsMoreIndented ? "\n" : " ";
-			}
-		}
-		folded += current;
-		hasContent = true;
-		previousIsMoreIndented = currentIsMoreIndented;
-		blankLines = 0;
+/** Comma-separated scalar shorthand is an application convention, not YAML list syntax. */
+export function parseFrontmatterList(value: unknown, field = "list"): string[] | undefined {
+	if (value === undefined) return undefined;
+	if (value === null || value === "") return [];
+	if (typeof value === "string") return value.split(",").map((part) => part.trim()).filter(Boolean);
+	if (Array.isArray(value)) {
+		return value.map((item) => {
+			if (typeof item !== "string" || !item.trim()) throw new Error(`Frontmatter '${field}' must contain non-empty strings.`);
+			return item.trim();
+		});
 	}
-
-	return folded.trim();
+	throw new Error(`Frontmatter '${field}' must be a comma-separated string or a YAML sequence of strings.`);
 }
 
-/**
- * Normalize a simple-scalar frontmatter list from comma-separated or block-list syntax.
- * Only the standard `- item` marker is removed; ordinary hyphenated values stay intact.
- * A trailing ` #...` comment is dropped from unquoted `- item` lines. Single-line values are left
- * alone because parseFrontmatter has already removed their quotes, so `"notes #1.md"` must survive.
- */
-export function parseFrontmatterList(raw: string | undefined): string[] | undefined {
-	if (raw === undefined) return undefined;
-	return raw
-		.split("\n")
-		.flatMap((line) => {
-			const value = line.trim();
-			const listItem = value.match(/^-\s+(.+)$/)?.[1];
-			const item = listItem === undefined || /^["']/.test(listItem) ? listItem ?? value : listItem.replace(/(?:^|\s)#.*$/, "");
-			return item.split(",");
-		})
-		.map((value) => value.trim())
-		.filter(Boolean);
-}
-
-/**
- * Parse YAML frontmatter from agent/chain files.
- * Handles both flat (key: value) and nested block (key: \n  sub: val) values.
- * Block values are stored as single strings with embedded newlines.
- * The indentation of the block content is preserved relative to the key.
- */
-export function parseFrontmatter(content: string): { frontmatter: Record<string, string>; body: string } {
-	const frontmatter: Record<string, string> = {};
+function extractFrontmatter(content: string): { header: string; body: string } | undefined {
 	const normalized = content.replace(/\r\n/g, "\n");
+	const opening = normalized.match(/^\uFEFF?---[ \t]*\n/);
+	if (!opening) return undefined;
+	const start = opening[0].length;
+	const closing = /^---[ \t]*$/gm;
+	closing.lastIndex = start;
+	const end = closing.exec(normalized);
+	if (!end) return undefined;
+	return { header: normalized.slice(start, end.index), body: normalized.slice(end.index + end[0].length).trim() };
+}
 
-	if (!normalized.startsWith("---")) {
-		return { frontmatter, body: normalized };
-	}
+const YAML_OPTIONS = { version: "1.2", schema: "core", strict: true, uniqueKeys: true, merge: false, resolveKnownTags: false } as const;
+const BLANK_AS_UNSET_FIELDS = new Set(["description", "runner", "acceptance", "permission", "permissions", "toolBudget", "outputSchema"]);
 
-	const endIndex = normalized.indexOf("\n---", 3);
-	if (endIndex === -1) {
-		return { frontmatter, body: normalized };
-	}
-
-	const frontmatterBlock = normalized.slice(4, endIndex);
-	const body = normalized.slice(endIndex + 4).trim();
-
-	const lines = frontmatterBlock.split("\n");
-	let currentKey: string | null = null;
-	let currentBlockLines: string[] | null = null;
-	let currentIndent: number | null = null;
-	let currentFolded = false;
-	let currentLiteral = false;
-
-	for (const line of lines) {
-		const indent = line.search(/\S|$/); // position of first non-whitespace char
-		const trimmed = line.trim();
-
-		// Comment lines are content only inside a | or > block scalar. Elsewhere they must
-		// neither end a pending list block nor become part of its value.
-		if (trimmed.startsWith("#") && !currentFolded && !currentLiteral) continue;
-
-		if (currentKey !== null && currentBlockLines !== null && (indent > (currentIndent ?? 0) || ((currentFolded || currentLiteral) && trimmed === ""))) {
-			// This line is part of the current block value
-			currentBlockLines.push(line);
-			continue;
-		}
-
-		// Flush any pending block value
-		if (currentKey !== null && currentBlockLines !== null) {
-			// Strip the common leading whitespace from the block so the
-			// serializer can add its own indentation level.
-			const rawBlock = currentBlockLines.join("\n");
-			const leadingSpaces = rawBlock.match(/^[ \t]+(?=\S)/m);
-			const prefix = leadingSpaces?.[0] ?? "";
-			const stripped = prefix
-				? rawBlock.replace(new RegExp(`^${escapeRegex(prefix)}`, "gm"), "").replace(/^\n/, "")
-				: rawBlock;
-			frontmatter[currentKey] = currentFolded ? foldBlock(stripped) : stripped;
-			currentKey = null;
-			currentBlockLines = null;
-			currentIndent = null;
-			currentFolded = false;
-			currentLiteral = false;
-		}
-
-		const match = line.match(/^([\w-]+):\s*(.*)$/);
-		if (match) {
-			const [key, rawValueValue] = match.slice(1);
-			if (key === undefined || rawValueValue === undefined) continue;
-			const rawValue = rawValueValue.trim();
-			const isQuoted = (rawValue.startsWith('"') && rawValue.endsWith('"')) || (rawValue.startsWith("'") && rawValue.endsWith("'"));
-			const value = isQuoted ? rawValue.slice(1, -1) : rawValue;
-			const isFolded = !isQuoted && (rawValue === ">" || rawValue === ">-");
-			const isLiteral = !isQuoted && (rawValue === "|" || rawValue === "|-");
-
-			if (value === "" || isFolded || isLiteral) {
-				// Key with empty value or block scalar indicator — defer storing until we see indent
-				currentKey = key;
-				currentBlockLines = [];
-				currentIndent = indent;
-				currentFolded = isFolded;
-				currentLiteral = isLiteral;
-			} else {
-				// Simple key: value
-				frontmatter[key] = value;
+/** Recover only unambiguous scalar identity for an invalid definition's diagnostic. */
+export function frontmatterDiagnosticIdentity(content: string): { name?: string; packageName?: string } {
+	const extracted = extractFrontmatter(content);
+	if (!extracted) return {};
+	const doc = parseDocument(extracted.header, YAML_OPTIONS);
+	const root = doc.contents;
+	if (!isMap(root)) return {};
+	const valueOf = (field: string): string | undefined => {
+		const matches = root.items.filter((pair) => isScalar(pair.key) && pair.key.value === field);
+		const values = matches.map(({ value }) => {
+			// Resolving an alias node does not expand collections or load the
+			// invalid document; only a scalar target can identify a diagnostic.
+			const scalar = isAlias(value) ? value.resolve(doc) : value;
+			if (!isScalar(scalar)) return undefined;
+			if (typeof scalar.value === "string" || typeof scalar.value === "boolean" || (typeof scalar.value === "number" && Number.isFinite(scalar.value))) {
+				return String(scalar.value);
 			}
+			return undefined;
+		});
+		// Duplicate declarations still invalidate the document, but identical
+		// identities remain unambiguous for blocking a lower-priority fallback.
+		return values.length && values[0] && values.every((value) => value === values[0]) ? values[0] : undefined;
+	};
+	const name = valueOf("name");
+	const packageName = valueOf("package");
+	return { ...(name ? { name } : {}), ...(packageName ? { packageName } : {}) };
+}
+
+/** Extract one Markdown frontmatter header; only the header is handed to YAML. */
+export function parseFrontmatter(content: string): { frontmatter: Frontmatter; body: string } {
+	const extracted = extractFrontmatter(content);
+	if (!extracted) return { frontmatter: {}, body: content.replace(/\r\n/g, "\n") };
+	const { header, body } = extracted;
+	const doc = parseDocument(header, YAML_OPTIONS);
+	if (doc.errors.length) throw new Error(`Invalid YAML frontmatter: ${doc.errors.map((error) => error.message).join("; ")}`);
+	if (doc.warnings.length) throw new Error(`Unsupported YAML frontmatter: ${doc.warnings.map((warning) => warning.message).join("; ")}`);
+	if (doc.directives.yaml.version !== "1.2") throw new Error("Frontmatter requires YAML 1.2.");
+	if (doc.contents === null) return { frontmatter: {}, body };
+	if (!isMap(doc.contents)) throw new Error("Frontmatter must be a YAML mapping.");
+	for (const pair of doc.contents.items) {
+		if (!isScalar(pair.key) || typeof pair.key.value !== "string") throw new Error("Frontmatter keys must be strings.");
+	}
+	const parsed: unknown = doc.toJS({ maxAliasCount: 100 });
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Frontmatter must be a YAML mapping.");
+	// Blank declarations historically mean unset for these fields, whereas an
+	// explicit YAML null must reach the consumer's validation. List fields keep
+	// their separate null-as-empty convention.
+	for (const pair of doc.contents.items) {
+		if (isScalar(pair.key) && BLANK_AS_UNSET_FIELDS.has(String(pair.key.value)) && isScalar(pair.value) && pair.value.value === null && pair.value.source === "" && pair.value.type === "PLAIN" && pair.value.tag === undefined) {
+			(parsed as Frontmatter)[String(pair.key.value)] = "";
 		}
-		// Lines that don't match a key pattern (e.g., comments, empty lines) are ignored
 	}
-
-	// Flush final block value
-	if (currentKey !== null && currentBlockLines !== null) {
-		const rawBlock = currentBlockLines.join("\n");
-		const leadingSpaces = rawBlock.match(/^[ \t]+(?=\S)/m);
-		const prefix = leadingSpaces?.[0] ?? "";
-		const stripped = prefix
-			? rawBlock.replace(new RegExp(`^${escapeRegex(prefix)}`, "gm"), "").replace(/^\n/, "")
-			: rawBlock;
-		frontmatter[currentKey] = currentFolded ? foldBlock(stripped) : stripped;
-	}
-
-	return { frontmatter, body };
+	const visiting = new WeakSet<object>();
+	const validate = (value: unknown): void => {
+		if (typeof value === "number" && !Number.isFinite(value)) throw new Error("Frontmatter does not support non-finite numbers.");
+		if (!value || typeof value !== "object") return;
+		if (visiting.has(value)) throw new Error("Frontmatter does not support cyclic YAML aliases.");
+		visiting.add(value);
+		for (const item of Object.values(value)) validate(item);
+		visiting.delete(value);
+	};
+	validate(parsed);
+	return { frontmatter: parsed as Frontmatter, body };
 }

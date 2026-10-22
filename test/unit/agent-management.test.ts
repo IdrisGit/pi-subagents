@@ -44,6 +44,7 @@ describe("agent management config parsing", () => {
 
 	for (const [label, description] of [
 		["single-line", "Summarize project documentation."],
+		["long single-line", "word ".repeat(30).trimEnd()],
 		["multiline", "Summarize project documentation.\nKeep the summary concise."],
 		["paragraphs and indentation", "Summarize documentation.\n\n  Keep examples indented.\n保留中文说明。"],
 	]) {
@@ -655,7 +656,7 @@ Advise only.
 		fs.mkdirSync(projectAgentsDir, { recursive: true });
 		fs.mkdirSync(userAgentsDir, { recursive: true });
 		fs.writeFileSync(path.join(userAgentsDir, "foo.md"), "---\nname: foo\ndescription: User foo\n---\nUser foo.\n");
-		fs.writeFileSync(path.join(projectAgentsDir, "foo.md"), "---\nname: foo\npackage: !!!\ndescription: Broken package\n---\nBroken foo.\n");
+		fs.writeFileSync(path.join(projectAgentsDir, "foo.md"), "---\nname: foo\npackage: \"!!!\"\ndescription: Broken package\n---\nBroken foo.\n");
 		const ctx = { cwd: tempDir, modelRegistry: { getAvailable: () => [] } };
 
 		const result = handleManagementAction("get", { agent: "foo" }, ctx);
