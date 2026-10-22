@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Structured delegation `:update` and `:response` events now carry an optional `providerDiagnostics` field, so a host extension can tell a child stuck in provider retry backoff (for example HTTP 429) from a long model turn. It reports the count and kind of failed requests and Pi's current retry phase, never the raw provider error. See [docs/extension-api.md](docs/extension-api.md). Thanks to [@IdrisGit](https://github.com/IdrisGit) for #2999 and [@legendtang](https://github.com/legendtang) for [#2991](https://github.com/nicobailon/pi-subagents/issues/2991).
+
 ## [0.80.0] - 2026-10-21
 
 ### Highlights
