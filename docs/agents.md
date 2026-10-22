@@ -402,7 +402,9 @@ allowedAgents: scout, reviewer
 Your system prompt goes here.
 ```
 
-Simple-scalar list fields accept either a comma-separated form or a newline block list with one `- item` per line. This applies to `tools`, `excludeTools`, `allowedAgents`, `defaultReads`, `skill`/`skills`, `skillPath`, `extensions`, and `subagentOnlyExtensions`:
+Frontmatter uses YAML 1.2; invalid syntax and duplicate keys fail. Block scalars use YAML chomping (`|` and `>` retain a final newline).
+
+List fields accept comma-separated scalar shorthand or YAML sequences: `tools: read, bash` splits; `- "a,b"` stays one entry. Omitted and empty fields differ. This applies to `tools`, `excludeTools`, `allowedAgents`, `defaultReads`, `skill`/`skills`, `skillPath`, `extensions`, `subagentOnlyExtensions`, `aliases`, and `mutationTools`:
 
 ```yaml
 tools:
